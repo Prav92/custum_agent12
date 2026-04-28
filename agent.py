@@ -63,7 +63,10 @@ class AgentState(TypedDict):
 # --- STEP 3: Logic Nodes ---
 
 # Set up the model with tools
-llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview").bind_tools(tools)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3-flash-preview",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+).bind_tools(tools)
 
 def get_system_prompt():
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
