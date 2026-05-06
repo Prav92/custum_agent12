@@ -21,8 +21,12 @@ app.add_middleware(
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# In-memory session store
+sessions = {}
+
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = "default"
 
 class ChatResponse(BaseModel):
     response: str
@@ -32,15 +36,25 @@ async def chat_endpoint(request: ChatRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
         
-    config = {"recursion_limit": 50}
+    session_id = request.session_id
+    if session_id not in sessions:
+        sessions[session_id] = []
+        
+    # Add user message to history
+    sessions[session_id].append(("user", request.message))
+    
+    config = {"recursion_limit": 50, "configurable": {"thread_id": session_id}}
     final_response = ""
     
     try:
-        # Run the message through the LangGraph agent
-        for output in agent_app.stream({"messages": [("user", request.message)]}, config=config):
+        # Run the full history through the LangGraph agent
+        for output in agent_app.stream({"messages": sessions[session_id]}, config=config):
             for node_name, node_output in output.items():
                 if node_name == "data_saver":
-                    content = node_output["messages"][-1].content
+                    final_msg = node_output["messages"][-1]
+                    sessions[session_id].append(final_msg) # Save agent response to history
+                    
+                    content = final_msg.content
                     if isinstance(content, list):
                         # Extract text from list of dicts
                         text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
