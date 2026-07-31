@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
 from agent import get_agent_app
+from api import app  # Expose ASGI app for deployments (e.g. Railway)
 
 load_dotenv()
 DB_URI = os.getenv("POSTGRES_DB_URL")
