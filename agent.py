@@ -137,4 +137,7 @@ workflow.add_conditional_edges("agent", should_continue)
 workflow.add_edge("tools", "agent")
 workflow.add_edge("data_saver", END)
 
-app = workflow.compile()
+def get_agent_app(checkpointer=None):
+    return workflow.compile(checkpointer=checkpointer)
+
+app = get_agent_app()
