@@ -1,5 +1,6 @@
 import os
 import shutil
+import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,13 +9,14 @@ from typing import Any, List
 from dotenv import load_dotenv
 
 from psycopg_pool import AsyncConnectionPool
+from psycopg.rows import dict_row
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agent import get_agent_app
 
 load_dotenv()
 
-DB_URI = os.getenv("POSTGRES_DB_URL", "postgresql://postgres:postgres@localhost:5432/novaagentdb")
+DB_URI = os.getenv("POSTGRES_DB_URL")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,6 +28,19 @@ async def lifespan(app: FastAPI):
         checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
         app.state.agent_app = get_agent_app(checkpointer=checkpointer)
+        app.state.db_pool = pool
+        
+        # Create users table if not exists
+        async with pool.connection() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    age INTEGER,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
         yield
 
 app = FastAPI(title="Gemini Multimodal Agent API", lifespan=lifespan)
@@ -131,6 +146,61 @@ async def get_history(session_id: str):
         return HistoryResponse(session_id=session_id, messages=formatted_messages)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
+
+class UserCreate(BaseModel):
+    name: str
+    email: str
+    age: int | None = None
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    age: int | None = None
+    created_at: datetime.datetime
+
+@app.post("/users", response_model=UserResponse)
+async def create_user(user: UserCreate):
+    try:
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "INSERT INTO users (name, email, age) VALUES (%s, %s, %s) RETURNING id, name, email, age, created_at",
+                    (user.name, user.email, user.age)
+                )
+                row = await cur.fetchone()
+                return row
+    except Exception as e:
+        err_msg = str(e)
+        if "unique constraint" in err_msg.lower() or "duplicate key" in err_msg.lower():
+            raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=500, detail=f"Database error: {err_msg}")
+
+@app.get("/users", response_model=List[UserResponse])
+async def list_users():
+    try:
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT id, name, email, age, created_at FROM users ORDER BY id ASC")
+                rows = await cur.fetchall()
+                return rows
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(user_id: int):
+    try:
+        async with app.state.db_pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT id, name, email, age, created_at FROM users WHERE id = %s", (user_id,))
+                row = await cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="User not found")
+                return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

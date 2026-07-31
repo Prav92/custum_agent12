@@ -5,7 +5,7 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from agent import get_agent_app
 
 load_dotenv()
-DB_URI = os.getenv("POSTGRES_DB_URL", "postgresql://postgres:postgres@localhost:5432/novaagentdb")
+DB_URI = os.getenv("POSTGRES_DB_URL")
 
 def run_agent():
     print("\n" + "="*30)
