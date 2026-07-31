@@ -56,6 +56,11 @@ app.add_middleware(
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+@app.get("/health")
+
+def health():
+    return {"status": "ok"}
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
