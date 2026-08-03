@@ -18,6 +18,7 @@ from auth.utils import (
 from auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
 logger = logging.getLogger("auth_router")
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
