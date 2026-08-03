@@ -90,3 +90,6 @@ zstandard==0.25.0
 langgraph-checkpoint-postgres
 psycopg[binary]
 psycopg-pool
+alembic==1.18.5
+argon2-cffi==25.1.0
+pyjwt==2.13.0

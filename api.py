@@ -1,8 +1,9 @@
 import os
 import shutil
 import datetime
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any, List
@@ -13,6 +14,12 @@ from psycopg.rows import dict_row
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agent import get_agent_app
+from db.session import get_db
+from db.models import User
+from auth.router import router as auth_router
+from auth.utils import hash_password
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 load_dotenv()
 
@@ -29,18 +36,6 @@ async def lifespan(app: FastAPI):
         await checkpointer.setup()
         app.state.agent_app = get_agent_app(checkpointer=checkpointer)
         app.state.db_pool = pool
-        
-        # Create users table if not exists
-        async with pool.connection() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL,
-                    email VARCHAR(255) UNIQUE NOT NULL,
-                    age INTEGER,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
         yield
 
 app = FastAPI(title="Gemini Multimodal Agent API", lifespan=lifespan)
@@ -52,6 +47,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include Authentication Router
+app.include_router(auth_router)
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -153,55 +151,67 @@ async def get_history(session_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
 
 class UserCreate(BaseModel):
-    name: str
+    name: str | None = None
     email: str
     age: int | None = None
 
 class UserResponse(BaseModel):
-    id: int
-    name: str
+    id: uuid.UUID
+    name: str | None = None
     email: str
     age: int | None = None
     created_at: datetime.datetime
 
+    class Config:
+        from_attributes = True
+
 @app.post("/users", response_model=UserResponse)
-async def create_user(user: UserCreate):
+async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
     try:
-        async with app.state.db_pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "INSERT INTO users (name, email, age) VALUES (%s, %s, %s) RETURNING id, name, email, age, created_at",
-                    (user.name, user.email, user.age)
-                )
-                row = await cur.fetchone()
-                return row
-    except Exception as e:
-        err_msg = str(e)
-        if "unique constraint" in err_msg.lower() or "duplicate key" in err_msg.lower():
+        # Check if email is already registered
+        result = await db.execute(select(User).where(User.email == user.email))
+        existing_user = result.scalars().first()
+        if existing_user:
             raise HTTPException(status_code=400, detail="Email already registered")
-        raise HTTPException(status_code=500, detail=f"Database error: {err_msg}")
+        
+        # Create user with a dummy/default password hash for legacy compatibility
+        dummy_pwd_hash = hash_password("legacy_user_no_password_12345")
+        db_user = User(
+            name=user.name,
+            email=user.email,
+            age=user.age,
+            password_hash=dummy_pwd_hash
+        )
+        db.add(db_user)
+        await db.commit()
+        await db.refresh(db_user)
+        return db_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/users", response_model=List[UserResponse])
-async def list_users():
+async def list_users(db: AsyncSession = Depends(get_db)):
     try:
-        async with app.state.db_pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT id, name, email, age, created_at FROM users ORDER BY id ASC")
-                rows = await cur.fetchall()
-                return rows
+        result = await db.execute(select(User).order_by(User.created_at.asc()))
+        return result.scalars().all()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/users/{user_id}", response_model=UserResponse)
-async def get_user(user_id: int):
+async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
     try:
-        async with app.state.db_pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT id, name, email, age, created_at FROM users WHERE id = %s", (user_id,))
-                row = await cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail="User not found")
-                return row
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format (UUID expected)")
+    
+    try:
+        result = await db.execute(select(User).where(User.id == user_uuid))
+        user = result.scalars().first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return user
     except HTTPException:
         raise
     except Exception as e:
