@@ -116,6 +116,7 @@ async def login(request: LoginRequest, response: Response, db: AsyncSession = De
         path="/"
     )
     
+    user.access_token = access_token
     logger.info(f"User {user.email} successfully logged in")
     return user
 

@@ -181,6 +181,41 @@ async def list_history(
             .order_by(ChatHistory.updated_at.desc())
         )
         histories = result.scalars().all()
+
+        # Resolve any placeholder titles ("Session <uuid>" or "Untitled") dynamically
+        agent_app = app.state.agent_app
+        updated_any = False
+        for chat_history in histories:
+            if not chat_history.title or chat_history.title.startswith("Session ") or chat_history.title == "Untitled":
+                config = {"configurable": {"thread_id": chat_history.session_id}}
+                try:
+                    state = await agent_app.aget_state(config)
+                    messages = state.values.get("messages", [])
+                    for msg in messages:
+                        msg_type = getattr(msg, "type", None)
+                        if msg_type == "human" and msg.content:
+                            content = msg.content
+                            if isinstance(content, list):
+                                text_parts = [part["text"] for part in content if isinstance(part, dict) and "text" in part]
+                                content = " ".join(text_parts)
+                            title = str(content)[:100].strip()
+                            if title:
+                                chat_history.title = title
+                                updated_any = True
+                                break
+                except Exception:
+                    pass
+
+        if updated_any:
+            await db.commit()
+            # Re-fetch to return the updated titles
+            result = await db.execute(
+                select(ChatHistory)
+                .where(ChatHistory.user_id == current_user.id)
+                .order_by(ChatHistory.updated_at.desc())
+            )
+            histories = result.scalars().all()
+
         return ChatHistoryListResponse(
             user_id=current_user.id,
             histories=histories
@@ -235,6 +270,54 @@ async def get_history(
         return HistoryResponse(session_id=session_id, messages=formatted_messages)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
+
+class ChatHistoryUpdateRequest(BaseModel):
+    title: str
+
+@app.patch("/history/{session_id}", response_model=ChatHistoryItem)
+async def update_history(
+    session_id: str,
+    request: ChatHistoryUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Rename a chat session title."""
+    result = await db.execute(
+        select(ChatHistory).where(
+            ChatHistory.session_id == session_id,
+            ChatHistory.user_id == current_user.id
+        )
+    )
+    chat_history = result.scalars().first()
+    if not chat_history:
+        raise HTTPException(status_code=404, detail="Chat session not found or does not belong to you.")
+
+    chat_history.title = request.title
+    chat_history.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    await db.commit()
+    await db.refresh(chat_history)
+    return chat_history
+
+@app.delete("/history/{session_id}")
+async def delete_history(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a chat session."""
+    result = await db.execute(
+        select(ChatHistory).where(
+            ChatHistory.session_id == session_id,
+            ChatHistory.user_id == current_user.id
+        )
+    )
+    chat_history = result.scalars().first()
+    if not chat_history:
+        raise HTTPException(status_code=404, detail="Chat session not found or does not belong to you.")
+
+    await db.delete(chat_history)
+    await db.commit()
+    return {"status": "success", "message": f"Session '{session_id}' deleted."}
 
 class UserCreate(BaseModel):
     name: str | None = None

@@ -1,6 +1,6 @@
 import uuid
 import jwt
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Header, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -10,16 +10,21 @@ from auth.utils import SECRET_KEY, ALGORITHM
 
 async def get_current_user(
     access_token: str | None = Cookie(default=None),
+    authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db)
 ) -> User:
-    """Dependency to retrieve the current user from the access_token cookie."""
-    if not access_token:
+    """Dependency to retrieve the current user from the access_token cookie or Authorization header."""
+    token = access_token
+    if not token and authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated"
         )
     try:
-        payload = jwt.decode(access_token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("user_id")
         if not user_id:
             raise HTTPException(

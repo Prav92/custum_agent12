@@ -41,6 +41,7 @@ class UserResponse(BaseModel):
     age: int | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    access_token: str | None = None
 
     class Config:
         from_attributes = True
