@@ -15,9 +15,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from agent import get_agent_app
 from db.session import get_db
-from db.models import User
+from db.models import User, ChatHistory
 from auth.router import router as auth_router
 from auth.utils import hash_password
+from auth.dependencies import get_current_user
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -61,17 +62,46 @@ def health():
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = "default"
+    session_id: str | None = None  # Optional: auto-generated if not provided
 
 class ChatResponse(BaseModel):
     response: str
+    session_id: str
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
-        
-    session_id = request.session_id
+
+    # Use provided session_id or generate a new one
+    session_id = request.session_id or str(uuid.uuid4())
+
+    # Check if this session already exists and belongs to this user
+    result = await db.execute(
+        select(ChatHistory).where(ChatHistory.session_id == session_id)
+    )
+    chat_history = result.scalars().first()
+
+    if chat_history:
+        # Session exists — verify ownership
+        if chat_history.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="This session does not belong to you.")
+    else:
+        # Create a new ChatHistory record for this user
+        title = request.message[:100].strip()  # Use first 100 chars of message as title
+        chat_history = ChatHistory(
+            user_id=current_user.id,
+            session_id=session_id,
+            title=title,
+        )
+        db.add(chat_history)
+        await db.commit()
+        await db.refresh(chat_history)
+
     config = {"recursion_limit": 50, "configurable": {"thread_id": session_id}}
     final_response = ""
     agent_app = app.state.agent_app
@@ -93,9 +123,15 @@ async def chat_endpoint(request: ChatRequest):
                     
         if not final_response:
             raise HTTPException(status_code=500, detail="Agent did not produce a final response.")
-            
-        return ChatResponse(response=final_response)
+
+        # Update the chat history timestamp
+        chat_history.updated_at = datetime.datetime.now(datetime.timezone.utc)
+        await db.commit()
+
+        return ChatResponse(response=final_response, session_id=session_id)
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -114,12 +150,62 @@ class Message(BaseModel):
     role: str
     content: Any
 
+class ChatHistoryItem(BaseModel):
+    id: uuid.UUID
+    session_id: str
+    title: str | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    class Config:
+        from_attributes = True
+
+class ChatHistoryListResponse(BaseModel):
+    user_id: uuid.UUID
+    histories: List[ChatHistoryItem]
+
 class HistoryResponse(BaseModel):
     session_id: str
     messages: List[Message]
 
+@app.get("/history", response_model=ChatHistoryListResponse)
+async def list_history(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """List all chat sessions for the authenticated user."""
+    try:
+        result = await db.execute(
+            select(ChatHistory)
+            .where(ChatHistory.user_id == current_user.id)
+            .order_by(ChatHistory.updated_at.desc())
+        )
+        histories = result.scalars().all()
+        return ChatHistoryListResponse(
+            user_id=current_user.id,
+            histories=histories
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch histories: {str(e)}")
+
 @app.get("/history/{session_id}", response_model=HistoryResponse)
-async def get_history(session_id: str):
+async def get_history(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get chat messages for a specific session. Verifies ownership."""
+    # Verify that this session belongs to the current user
+    result = await db.execute(
+        select(ChatHistory).where(
+            ChatHistory.session_id == session_id,
+            ChatHistory.user_id == current_user.id
+        )
+    )
+    chat_history = result.scalars().first()
+    if not chat_history:
+        raise HTTPException(status_code=404, detail="Chat session not found or does not belong to you.")
+
     config = {"configurable": {"thread_id": session_id}}
     agent_app = app.state.agent_app
     
