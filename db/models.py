@@ -45,3 +45,16 @@ class ChatHistory(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
 
     user = relationship("User", back_populates="chat_histories")
+    messages = relationship("ChatMessage", back_populates="chat_history", cascade="all, delete-orphan")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chat_history_id = Column(UUID(as_uuid=True), ForeignKey("chat_histories.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(50), nullable=False)  # 'user' or 'assistant'
+    content = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
+
+    chat_history = relationship("ChatHistory", back_populates="messages")
+

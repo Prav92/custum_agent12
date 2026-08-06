@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_tavily import TavilySearch
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -84,7 +85,8 @@ class AgentState(TypedDict):
 # Set up the model with tools
 llm = ChatGoogleGenerativeAI(
     model=MODEL_NAME,
-    google_api_key=os.getenv("GOOGLE_API_KEY")
+    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    streaming=True
 ).bind_tools(tools)
 
 def get_system_prompt():
@@ -99,20 +101,20 @@ def get_system_prompt():
         "about a document you previously processed, reuse the file path from the conversation history."
     ))
 
-def call_model(state: AgentState):
+async def call_model(state: AgentState, config: RunnableConfig):
     # Include system message in the call
     messages = [get_system_prompt()] + state["messages"]
-    
-    @retry_strategy
-    def invoke_llm():
-        try:
-            return llm.invoke(messages)
-        except Exception as e:
-            print(f"Error invoking LLM: {e}")
-            raise
-        
-    response = invoke_llm()
-    return {"messages": [response]}
+    try:
+        final_message = None
+        async for chunk in llm.astream(messages, config=config):
+            if final_message is None:
+                final_message = chunk
+            else:
+                final_message += chunk
+        return {"messages": [final_message]}
+    except Exception as e:
+        print(f"Error invoking LLM: {e}")
+        raise
 
 def data_saver(state: AgentState):
     """Node that represents the final state before completion."""
